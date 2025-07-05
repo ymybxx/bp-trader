@@ -50,7 +50,7 @@
 
 ### API 密钥说明
 - `BACKPACK_API_KEY`: Backpack 交易所的 API Key
-- `BACKPACK_PRIVATE_KEY`: ED25519 私钥（需要 Base64 编码）
+- `BACKPACK_PRIVATE_KEY`: Backpack 交易所的 API Secret
 
 ## 🚀 启动方式
 
