@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    network_mode: "host"
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      - ENV=prod
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data: 
