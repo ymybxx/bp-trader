@@ -151,15 +151,22 @@ class BackpackClient:
         return self._make_request("GET", endpoint, params, auth=True)
     
     def place_order(self, symbol: str, side: str, order_type: str, 
-                   quantity: float, price: float = None, time_in_force: str = "GTC", 
+                   quantity, price: float = None, time_in_force: str = "GTC", 
                    reduce_only: bool = False) -> Dict[str, Any]:
         """下单"""
         endpoint = "/api/v1/order"
+        
+        # 确保quantity是正确的字符串格式，避免科学计数法
+        if isinstance(quantity, (int, float)):
+            quantity_str = f"{float(quantity):f}".rstrip('0').rstrip('.')
+        else:
+            quantity_str = str(quantity)
+            
         params = {
             "symbol": f"{symbol}_USDC_PERP",
             "side": side,  # "Bid" 或 "Ask"
             "orderType": order_type,  # "Limit" 或 "Market"
-            "quantity": str(quantity),
+            "quantity": quantity_str,
             "timeInForce": time_in_force
         }
         

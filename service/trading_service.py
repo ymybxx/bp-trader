@@ -18,6 +18,7 @@ class TradingService:
         self.trade_amount = TRADING_CONFIG["trade_amount"]
         self.trading_symbol = f"{self.symbol}_USDC_PERP"
         self.last_order_time = None  # 记录最后下单时间
+        self.quantity_precision = None  # 数量精度
 
     def get_position(self) -> Optional[Dict]:
         """获取指定代币的仓位信息"""
@@ -85,6 +86,35 @@ class TradingService:
             logger.error(f"获取买一价失败: {e}")
             return None
 
+    def get_quantity_precision(self) -> int:
+        """获取数量精度"""
+        if self.quantity_precision is not None:
+            return self.quantity_precision
+
+        try:
+            markets = self.client.get_markets()
+            for market in markets:
+                if market.get("symbol") == self.trading_symbol:
+                    step_size = market.get("filters", {}).get("quantity", {}).get("stepSize")
+                    if step_size:
+                        # 计算stepSize的小数位数，移除末尾的0
+                        step_decimal = Decimal(step_size)
+                        precision = len(str(step_decimal).rstrip('0').split('.')[-1])
+                        self.quantity_precision = precision
+                        logger.info(f"{self.symbol}数量精度: {precision}位小数, stepSize: {step_size}")
+                        return precision
+
+            # 如果找不到，默认使用6位精度（适合大多数交易对）
+            logger.warning(f"未找到{self.symbol}的精度信息，使用默认6位小数")
+            self.quantity_precision = 6
+            return 6
+
+        except Exception as e:
+            logger.error(f"获取数量精度失败: {e}")
+            # 回退到默认精度
+            self.quantity_precision = 6
+            return 6
+
     def calculate_order_quantity(self, price: float) -> float:
         """计算下单数量"""
         # 单次交易额 / 价格 = 数量
@@ -92,11 +122,12 @@ class TradingService:
         margin_needed = self.trade_amount / self.leverage
         quantity = self.trade_amount / price
 
-        # 四舍五入到2位小数
-        quantity = round(quantity, 2)
+        # 获取动态精度并四舍五入
+        precision = self.get_quantity_precision()
+        quantity = round(quantity, precision)
 
         logger.info(f"计算订单数量: 交易额={self.trade_amount}, 杠杆={self.leverage}, "
-                   f"保证金={margin_needed}, 价格={price}, 数量={quantity}")
+                   f"保证金={margin_needed}, 价格={price}, 数量={quantity}, 精度={precision}")
 
         return quantity
 
@@ -141,15 +172,21 @@ class TradingService:
                 side = "Ask" if quantity > 0 else "Bid"  # 多头平仓卖出，空头平仓买入
                 abs_quantity = abs(quantity)
 
-                # 市价平仓，先不用reduceOnly试试
+                # 获取数量精度并格式化，避免科学计数法
+                precision = self.get_quantity_precision()
+                formatted_quantity = f"{abs_quantity:.{precision}f}"
+
+                logger.info(f"平仓数量: 原始={abs_quantity}, 格式化={formatted_quantity}")
+
+                # 市价平仓，使用reduceOnly确保只平仓不开新仓
                 result = self.client.place_order(
                     symbol=self.symbol,
                     side=side,
                     order_type="Market",
-                    quantity=abs_quantity
+                    quantity=formatted_quantity,  # 直接传递字符串格式
                 )
 
-                logger.info(f"市价平仓成功: 方向={side}, 数量={abs_quantity}, 结果={result}")
+                logger.info(f"市价平仓成功: 方向={side}, 数量={formatted_quantity}, 结果={result}")
                 return True
 
             logger.info("仓位数量为0，无需平仓")
@@ -159,33 +196,37 @@ class TradingService:
             logger.error(f"市价平仓失败: {e}")
             return False
 
-    def cancel_old_orders(self) -> bool:
+    def cancel_old_orders(self, existing_orders: List[Dict] = None) -> bool:
         """取消旧的挂单"""
         try:
-            orders = self.client.get_open_orders(self.symbol)
+            cancel_errors = []
+            
+            # 如果传入了已有订单数据，直接使用，避免重复请求
+            if existing_orders is not None:
+                symbol_orders = existing_orders
+            else:
+                symbol_orders = self.get_open_orders()
 
-            if isinstance(orders, list):
-                symbol_orders = [order for order in orders if order.get("symbol") == self.trading_symbol]
-                for order in symbol_orders:
-                    order_id = order.get("id")
-                    if order_id:
+            # 取消所有订单
+            for order in symbol_orders:
+                order_id = order.get("id") or order.get("orderId")
+                if order_id:
+                    try:
                         self.client.cancel_order(order_id, self.symbol)
-                        logger.info(f"取消订单: {order_id}")
-                return len(symbol_orders) > 0
-            elif isinstance(orders, dict):
-                open_orders = orders.get("orders", [])
-                symbol_orders = [order for order in open_orders if order.get("symbol") == self.trading_symbol]
-                for order in symbol_orders:
-                    order_id = order.get("orderId")
-                    if order_id:
-                        self.client.cancel_order(order_id, self.symbol)
-                        logger.info(f"取消订单: {order_id}")
-                return len(symbol_orders) > 0
+                        logger.info(f"取消订单成功: {order_id}")
+                    except Exception as e:
+                        logger.error(f"取消订单{order_id}失败: {e}")
+                        cancel_errors.append(order_id)
 
-            return False
+            # 如果有取消失败的订单，返回False
+            if cancel_errors:
+                logger.error(f"有{len(cancel_errors)}个订单取消失败，不允许下新订单")
+                return False
+                
+            return len(symbol_orders) > 0
 
         except Exception as e:
-            logger.error(f"取消订单失败: {e}")
+            logger.error(f"获取订单信息失败: {e}")
             return False
 
     def execute_trading_logic(self):
@@ -206,7 +247,7 @@ class TradingService:
                 # 如果是初次运行（没有记录下单时间），直接取消所有订单保证持仓干净
                 if self.last_order_time is None:
                     logger.info("初次运行，取消所有现有订单保证持仓干净")
-                    cancel_success = self.cancel_old_orders()
+                    cancel_success = self.cancel_old_orders(open_orders)  # 传递已获取的订单数据
                     if not cancel_success:
                         logger.error("取消订单失败，跳过本轮交易")
                         return
@@ -227,7 +268,7 @@ class TradingService:
 
                         if should_cancel:
                             logger.info("订单超时10秒且价格不是买最高价，取消订单并重新下单")
-                            cancel_success = self.cancel_old_orders()
+                            cancel_success = self.cancel_old_orders(open_orders)  # 传递已获取的订单数据
                             if not cancel_success:
                                 logger.error("取消订单失败，跳过本轮交易")
                                 return
@@ -247,20 +288,3 @@ class TradingService:
             logger.error(f"执行交易逻辑失败: {e}")
             logger.info("等待5秒后重试...")
             time.sleep(5)
-
-    def get_account_info(self) -> Dict:
-        """获取账户信息"""
-        try:
-            balance = self.client.get_balance()
-            positions = self.client.get_positions()
-            orders = self.client.get_open_orders()
-
-            return {
-                "balance": balance,
-                "positions": positions,
-                "orders": orders
-            }
-
-        except Exception as e:
-            logger.error(f"获取账户信息失败: {e}")
-            return {}
