@@ -1,10 +1,10 @@
-from typing import Dict, List, Optional
+import datetime
 import time
 from decimal import Decimal
-import datetime
+from typing import Dict, List, Optional
 
-from service.backpack_client import BackpackClient
 from config.config import TRADING_CONFIG
+from service.backpack_client import BackpackClient
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -19,6 +19,7 @@ class TradingService:
         self.trading_symbol = f"{self.symbol}_USDC_PERP"
         self.last_order_time = None  # 记录最后下单时间
         self.quantity_precision = None  # 数量精度
+        self.leverage_checked = False  # 杠杆检查状态
 
     def get_position(self) -> Optional[Dict]:
         """获取指定代币的仓位信息"""
@@ -115,6 +116,33 @@ class TradingService:
             self.quantity_precision = 6
             return 6
 
+    def check_and_set_leverage(self) -> bool:
+        """检查并设置账户杠杆"""
+        if self.leverage_checked:
+            return True
+
+        try:
+            # 获取账户信息
+            account_info = self.client.get_account()
+            current_leverage = float(account_info.get("leverageLimit", 0))
+
+            logger.info(f"当前账户杠杆: {current_leverage}, 配置杠杆: {self.leverage}")
+
+            # 如果当前杠杆与配置不符，更新杠杆
+            if current_leverage != self.leverage:
+                logger.info(f"更新账户杠杆从 {current_leverage} 到 {self.leverage}")
+                result = self.client.update_account_leverage(self.leverage)
+                logger.info(f"杠杆更新成功: {result}")
+            else:
+                logger.info("账户杠杆已符合配置要求")
+
+            self.leverage_checked = True
+            return True
+
+        except Exception as e:
+            logger.error(f"检查/设置杠杆失败: {e}")
+            return False
+
     def calculate_order_quantity(self, price: float) -> float:
         """计算下单数量"""
         # 单次交易额 / 价格 = 数量
@@ -127,7 +155,7 @@ class TradingService:
         quantity = round(quantity, precision)
 
         logger.info(f"计算订单数量: 交易额={self.trade_amount}, 杠杆={self.leverage}, "
-                   f"保证金={margin_needed}, 价格={price}, 数量={quantity}, 精度={precision}")
+                    f"保证金={margin_needed}, 价格={price}, 数量={quantity}, 精度={precision}")
 
         return quantity
 
@@ -200,7 +228,7 @@ class TradingService:
         """取消旧的挂单"""
         try:
             cancel_errors = []
-            
+
             # 如果传入了已有订单数据，直接使用，避免重复请求
             if existing_orders is not None:
                 symbol_orders = existing_orders
@@ -222,7 +250,7 @@ class TradingService:
             if cancel_errors:
                 logger.error(f"有{len(cancel_errors)}个订单取消失败，不允许下新订单")
                 return False
-                
+
             return len(symbol_orders) > 0
 
         except Exception as e:
@@ -233,6 +261,11 @@ class TradingService:
         """执行交易逻辑"""
         try:
             logger.info(f"开始执行交易逻辑 - 代币: {self.symbol}, 杠杆: {self.leverage}, 交易额: {self.trade_amount}")
+
+            # 检查并设置账户杠杆
+            if not self.check_and_set_leverage():
+                logger.error("杠杆设置失败，跳过本轮交易")
+                return
 
             # 检查是否存在仓位
             position = self.get_position()
