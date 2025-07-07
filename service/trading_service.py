@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from config.config import TRADING_CONFIG
 from service.backpack_client import BackpackClient
+from service.dual_hedge_service import DualHedgeService
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -12,14 +13,23 @@ logger = setup_logger(__name__)
 
 class TradingService:
     def __init__(self):
-        self.client = BackpackClient()
-        self.symbol = TRADING_CONFIG["symbol"]
-        self.leverage = TRADING_CONFIG["leverage"]
-        self.trade_amount = TRADING_CONFIG["trade_amount"]
-        self.trading_symbol = f"{self.symbol}_USDC_PERP"
-        self.last_order_time = None  # 记录最后下单时间
-        self.quantity_precision = None  # 数量精度
-        self.leverage_checked = False  # 杠杆检查状态
+        self.trading_mode = TRADING_CONFIG["mode"]
+
+        # 根据模式初始化对应的服务
+        if self.trading_mode == "dual_hedge":
+            self.hedge_service = DualHedgeService()
+            logger.info("初始化双账户对冲策略")
+        else:
+            # 单账户模式的原有逻辑
+            self.client = BackpackClient()
+            self.symbol = TRADING_CONFIG["symbol"]
+            self.leverage = TRADING_CONFIG["leverage"]
+            self.trade_amount = TRADING_CONFIG["trade_amount"]
+            self.trading_symbol = f"{self.symbol}_USDC_PERP"
+            self.last_order_time = None  # 记录最后下单时间
+            self.quantity_precision = None  # 数量精度
+            self.leverage_checked = False  # 杠杆检查状态
+            logger.info("初始化单账户策略")
 
     def get_position(self) -> Optional[Dict]:
         """获取指定代币的仓位信息"""
@@ -42,50 +52,49 @@ class TradingService:
             raise
 
     def get_open_orders(self) -> List[Dict]:
-        """获取指定代币的挂单列表"""
-        try:
-            orders = self.client.get_open_orders(self.symbol)
-            symbol_orders = []
+        """获取指定代币的挂单列表
+        Raises:
+            Exception: 如果API调用失败
+        """
+        orders = self.client.get_open_orders(self.symbol)
+        symbol_orders = []
 
-            # orders可能是一个数组
-            if isinstance(orders, list):
-                # 过滤指定代币的挂单
-                symbol_orders = [order for order in orders if order.get("symbol") == self.trading_symbol]
-            elif isinstance(orders, dict):
-                # 如果是字典格式
-                open_orders = orders.get("orders", [])
-                symbol_orders = [order for order in open_orders if order.get("symbol") == self.trading_symbol]
+        # orders可能是一个数组
+        if isinstance(orders, list):
+            # 过滤指定代币的挂单
+            symbol_orders = [order for order in orders if order.get("symbol") == self.trading_symbol]
+        elif isinstance(orders, dict):
+            # 如果是字典格式
+            open_orders = orders.get("orders", [])
+            symbol_orders = [order for order in open_orders if order.get("symbol") == self.trading_symbol]
 
-            if symbol_orders:
-                logger.info(f"发现{self.symbol}挂单: {len(symbol_orders)}个")
+        if symbol_orders:
+            logger.info(f"发现{self.symbol}挂单: {len(symbol_orders)}个")
 
-            return symbol_orders
-
-        except Exception as e:
-            logger.error(f"检查挂单失败: {e}")
-            return []
+        return symbol_orders
 
     def has_open_orders(self) -> bool:
-        """检查是否存在指定代币的挂单"""
+        """检查是否存在指定代币的挂单
+        Raises:
+            Exception: 如果API调用失败
+        """
         return len(self.get_open_orders()) > 0
 
     def get_best_bid_price(self) -> Optional[float]:
-        """获取买一价"""
-        try:
-            depth = self.client.get_depth(self.symbol)
-            bids = depth.get("bids", [])
+        """获取买一价
+        Raises:
+            Exception: 如果API调用失败
+        """
+        depth = self.client.get_depth(self.symbol)
+        bids = depth.get("bids", [])
 
-            if bids:
-                best_bid = bids[-1]  # 最后一个是最高买价
-                price = float(best_bid[0])
-                logger.info(f"{self.symbol}买一价: {price}")
-                return price
+        if bids:
+            best_bid = bids[-1]  # 最后一个是最高买价
+            price = float(best_bid[0])
+            logger.info(f"{self.symbol}买一价: {price}")
+            return price
 
-            return None
-
-        except Exception as e:
-            logger.error(f"获取买一价失败: {e}")
-            return None
+        return None
 
     def get_quantity_precision(self) -> int:
         """获取数量精度"""
@@ -163,9 +172,14 @@ class TradingService:
         """下限价买单"""
         try:
             # 获取买一价
-            best_bid = self.get_best_bid_price()
+            try:
+                best_bid = self.get_best_bid_price()
+            except Exception as e:
+                logger.error(f"获取买一价失败: {e}")
+                return False
+
             if not best_bid:
-                logger.error("无法获取买一价")
+                logger.error("无法获取有效的买一价")
                 return False
 
             # 计算下单数量
@@ -206,7 +220,7 @@ class TradingService:
 
                 logger.info(f"平仓数量: 原始={abs_quantity}, 格式化={formatted_quantity}")
 
-                # 市价平仓，使用reduceOnly确保只平仓不开新仓
+                # 市价平仓
                 result = self.client.place_order(
                     symbol=self.symbol,
                     side=side,
@@ -233,7 +247,11 @@ class TradingService:
             if existing_orders is not None:
                 symbol_orders = existing_orders
             else:
-                symbol_orders = self.get_open_orders()
+                try:
+                    symbol_orders = self.get_open_orders()
+                except Exception as e:
+                    logger.error(f"获取订单信息失败: {e}")
+                    return False
 
             # 取消所有订单
             for order in symbol_orders:
@@ -257,10 +275,11 @@ class TradingService:
             logger.error(f"获取订单信息失败: {e}")
             return False
 
-    def execute_trading_logic(self):
-        """执行交易逻辑"""
+    def execute_single_trading_logic(self):
+        """执行单账户交易逻辑"""
         try:
-            logger.info(f"开始执行交易逻辑 - 代币: {self.symbol}, 杠杆: {self.leverage}, 交易额: {self.trade_amount}")
+            logger.info(
+                f"开始执行单账户交易逻辑 - 代币: {self.symbol}, 杠杆: {self.leverage}, 交易额: {self.trade_amount}")
 
             # 检查并设置账户杠杆
             if not self.check_and_set_leverage():
@@ -275,7 +294,12 @@ class TradingService:
                 return
 
             # 获取当前挂单
-            open_orders = self.get_open_orders()
+            try:
+                open_orders = self.get_open_orders()
+            except Exception as e:
+                logger.error(f"获取挂单信息失败，跳过本轮交易: {e}")
+                return
+
             if open_orders:
                 # 如果是初次运行（没有记录下单时间），直接取消所有订单保证持仓干净
                 if self.last_order_time is None:
@@ -288,7 +312,12 @@ class TradingService:
                 # 检查订单是否超时（10秒）
                 elif (datetime.datetime.now() - self.last_order_time).total_seconds() > 10:
                     # 获取当前买一价
-                    best_bid = self.get_best_bid_price()
+                    try:
+                        best_bid = self.get_best_bid_price()
+                    except Exception as e:
+                        logger.error(f"获取买一价失败: {e}")
+                        return
+
                     if best_bid:
                         # 检查是否有订单价格与买最高价相同
                         should_cancel = True
@@ -318,6 +347,20 @@ class TradingService:
                 self.place_limit_buy_order()
 
         except Exception as e:
-            logger.error(f"执行交易逻辑失败: {e}")
+            logger.error(f"执行单账户交易逻辑失败: {e}")
             logger.info("等待5秒后重试...")
+            time.sleep(5)
+
+    def execute_trading_logic(self):
+        """执行交易逻辑 - 根据模式路由到不同策略"""
+        try:
+            if self.trading_mode == "dual_hedge":
+                # 双账户对冲策略
+                self.hedge_service.execute_hedge_logic()
+            else:
+                # 单账户策略（默认）
+                self.execute_single_trading_logic()
+
+        except Exception as e:
+            logger.error(f"执行交易逻辑失败: {e}")
             time.sleep(5)

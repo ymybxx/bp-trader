@@ -13,10 +13,18 @@ logger = setup_logger(__name__)
 
 
 class BackpackClient:
-    def __init__(self):
-        self.api_key = BACKPACK_CONFIG["api_key"]
-        self.private_key = BACKPACK_CONFIG["private_key"]
-        self.base_url = BACKPACK_CONFIG["base_url"]
+    def __init__(self, config=None):
+        """
+        初始化Backpack客户端
+        Args:
+            config: 可选的配置字典，如果不提供则使用默认的BACKPACK_CONFIG
+        """
+        if config is None:
+            config = BACKPACK_CONFIG
+            
+        self.api_key = config["api_key"]
+        self.private_key = config["private_key"]
+        self.base_url = config["base_url"]
 
         if not self.api_key or not self.private_key:
             raise ValueError("BACKPACK_API_KEY和BACKPACK_PRIVATE_KEY必须设置")
