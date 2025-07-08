@@ -4,14 +4,25 @@
 
 ## 🎯 策略说明
 
-### 交易策略概述
-本机器人采用保守的限价买入策略，旨在以最优价格进行交易：
+### 交易模式
+本机器人支持两种交易模式：
+
+#### 1. 单账户模式 (Single Mode)
+采用保守的限价买入策略，旨在以最优价格进行交易：
 
 1. **持仓优先平仓**：如果检测到现有仓位，立即执行市价平仓
 2. **限价买入**：以当前最高买价（买一价）下限价买单
 3. **智能订单管理**：根据市场变化智能管理订单
 
-### 订单管理逻辑
+#### 2. 对冲模式 (Dual Hedge Mode)
+使用两个账户进行对冲交易，降低市场风险：
+
+1. **双向开仓**：同时在两个账户上开多仓和空仓
+2. **等待期**：持仓等待指定时间（默认30秒）
+3. **同步平仓**：到期后同时平仓两个账户的仓位
+4. **市场对冲**：如果一方先成交，自动对另一方进行市价对冲
+
+### 单账户模式订单管理逻辑
 
 #### 初次运行
 - 检测到现有订单时，**自动取消所有订单**，确保持仓干净
@@ -26,6 +37,27 @@
 #### 仓位管理
 - 检测到任何仓位时，立即执行市价平仓
 - 平仓完成后，继续执行限价买入策略
+
+### 对冲模式交易逻辑
+
+#### 开仓阶段 (Opening Phase)
+- 同时在两个账户上下限价单：账户1做多，账户2做空
+- 如果一方先成交，自动对另一方进行市价对冲
+- 确保两个账户都有相应的仓位
+
+#### 等待阶段 (Waiting Phase)
+- 持仓等待配置的时间（由 `HEDGE_CLOSE_DELAY_SECONDS` 控制）
+- 期间监控仓位状态，确保对冲有效
+
+#### 平仓阶段 (Closing Phase)
+- 等待期结束后，同时对两个账户进行平仓操作
+- 优先使用限价单平仓，如果无法成交则使用市价单
+- 确保两个账户的仓位都完全平仓
+
+#### 风险控制
+- 实时监控两个账户的仓位状态
+- 自动处理部分成交、订单取消等异常情况
+- 如果对冲失败，自动进行风险控制
 
 ## 🔧 配置说明
 
@@ -42,15 +74,42 @@
    BACKPACK_PRIVATE_KEY=your_base64_encoded_private_key_here
    BACKPACK_BASE_URL=https://api.backpack.exchange
    
+   # 对冲模式需要第二个账户（仅在 dual_hedge 模式下需要）
+   BACKPACK_API_KEY2=your_second_account_api_key_here
+   BACKPACK_PRIVATE_KEY2=your_second_account_private_key_here
+   
    # 交易配置
+   TRADING_MODE=single         # 交易模式: single 或 dual_hedge
    TRADING_SYMBOL=SOL          # 交易代币符号
    TRADING_LEVERAGE=10         # 杠杆倍数
    TRADING_AMOUNT=100.0        # 单次交易金额(USDT)
+   
+   # 对冲模式配置（仅在 dual_hedge 模式下生效）
+   HEDGE_CLOSE_DELAY_SECONDS=30  # 对冲持仓时间（秒）
    ```
 
-### API 密钥说明
-- `BACKPACK_API_KEY`: Backpack 交易所的 API Key
-- `BACKPACK_PRIVATE_KEY`: Backpack 交易所的 API Secret
+### 配置参数说明
+
+#### API 配置
+- `BACKPACK_API_KEY`: 主账户的 API Key
+- `BACKPACK_PRIVATE_KEY`: 主账户的 API Secret
+- `BACKPACK_API_KEY2`: 第二账户的 API Key（仅对冲模式需要）
+- `BACKPACK_PRIVATE_KEY2`: 第二账户的 API Secret（仅对冲模式需要）
+- `BACKPACK_BASE_URL`: Backpack API 地址
+
+#### 交易配置
+- `TRADING_MODE`: 交易模式
+  - `single`: 单账户模式（默认）
+  - `dual_hedge`: 双账户对冲模式
+- `TRADING_SYMBOL`: 交易代币符号
+- `TRADING_LEVERAGE`: 杠杆倍数
+- `TRADING_AMOUNT`: 单次交易金额(USDT)
+
+#### 对冲模式配置
+- `HEDGE_CLOSE_DELAY_SECONDS`: 对冲持仓时间（秒），默认30秒
+  - 这是开仓后等待平仓的时间
+  - 期间可以从价差中获利
+  - 建议根据市场波动性调整
 
 ## 🚀 启动方式
 
@@ -110,12 +169,23 @@ docker-compose down
 1. **资金风险**：本机器人涉及真实资金交易，请谨慎使用
 2. **测试建议**：建议先在测试环境充分测试
 3. **监控要求**：运行期间请密切关注日志和账户状态
+4. **对冲模式风险**：
+   - 需要两个独立的 Backpack 账户
+   - 确保两个账户都有足够的资金和保证金
+   - 网络延迟可能导致对冲不完全
+   - 市场剧烈波动时可能影响对冲效果
 
 ### 使用建议
 1. **合理设置交易金额**：根据你的风险承受能力设置 `TRADING_AMOUNT`
 2. **选择合适杠杆**：杠杆倍数越高风险越大
 3. **网络稳定性**：确保运行环境网络稳定
 4. **定期检查**：定期检查程序运行状态和账户资金
+5. **对冲模式建议**：
+   - 首次使用建议从小金额开始测试
+   - 确保两个账户的API权限完全一致
+   - 合理设置对冲持仓时间，避免过短或过长
+   - 在市场波动较大时谨慎使用
+   - 定期检查两个账户的资金和仓位状态
 
 ### 系统要求
 - Python 推荐3.12 其他自测
